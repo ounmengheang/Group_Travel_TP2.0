@@ -15,10 +15,10 @@ import {
 import { useState } from 'react'
 import { PAY_WINDOWS, PAYMENT_METHODS, TRIP } from '../data/mockData'
 import { usd } from '../lib/format'
-import { assignRooms, stayShare } from '../lib/pricing'
+import { roomLabel, stayShare } from '../lib/pricing'
 import { useTimeLeft } from '../lib/useTimeLeft'
 import { useGroup } from '../state/context'
-import { joined, lockedStay, organizerOf, owes, travellers, voteOptions } from '../state/groupState'
+import { joined, lockedStay, memberById, organizerOf, owes, travellers, voteOptions } from '../state/groupState'
 import Avatar from './Avatar'
 import StatusBadge from './StatusBadge'
 import { Button, Card } from './ui'
@@ -74,10 +74,25 @@ export function Modal({ title, subtitle, onClose, children }) {
   )
 }
 
-// Invite → Vote → Pay → Book, so everyone knows where the group is.
+// A prominent countdown, so a deadline is never a surprise.
+export function Deadline({ label, at, passed }) {
+  const timeLeft = useTimeLeft(at)
+  if (!at) return null
+  return (
+    <div className={`flex flex-wrap items-center justify-between gap-x-4 gap-y-1 rounded-2xl px-4 py-3 ${passed ? 'bg-rose-50 text-rose-700' : 'bg-amber-50 text-amber-900'}`}>
+      <p className="flex items-center gap-2 text-sm font-semibold">
+        <AlarmClock className="h-4 w-4 shrink-0" /> {passed ? `${label}: deadline passed` : label}
+      </p>
+      <p className="text-xl font-extrabold tabular-nums tracking-tight">{passed ? '12h extension running' : timeLeft}</p>
+    </div>
+  )
+}
+
+// Join → Vote → Rooms → Pay → Booked, so everyone knows where the group is.
 const STEPS = [
   { id: 'inviting', label: 'Join' },
   { id: 'voting', label: 'Vote' },
+  { id: 'rooms', label: 'Rooms' },
   { id: 'paying', label: 'Pay' },
   { id: 'booked', label: 'Booked' },
 ]
@@ -100,7 +115,7 @@ export function StageSteps() {
             >
               {done ? <Check className="h-4 w-4" strokeWidth={3} /> : i + 1}
             </span>
-            <span className={`text-sm font-semibold ${active ? 'text-ink' : 'text-muted'}`}>
+            <span className={`text-sm font-semibold ${active ? 'text-ink' : 'hidden text-muted sm:inline'}`}>
               {step.label}
               {active && state.stage === 'change' && <span className="ml-1.5 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] text-amber-800">Plan change</span>}
             </span>
@@ -134,8 +149,10 @@ export function VoteCard({ viewerId }) {
   return (
     <Card className="space-y-4">
       <SectionTitle hint={`${voted} of ${voters.length} voted`}>Where should the group stay?</SectionTitle>
+      <Deadline label="Vote closes in" at={state.voteEndsAt} />
       <p className="text-sm text-muted">
-        Prices are per person for {voters.length} travellers: your flight ({usd(TRIP.flight.perPerson)}) plus your part of the stay.
+        Prices are per person for {voters.length} travellers: your flight ({usd(TRIP.flight.perPerson)}) plus your part of the stay. The exact price is locked once rooms
+        are arranged.
       </p>
 
       <div className="grid gap-3 md:grid-cols-3">
@@ -193,7 +210,7 @@ export function VoteCard({ viewerId }) {
 
       <Why>
         Votes are anonymous: everyone sees totals, not who chose what. You can change your vote until {viewer.isOrganizer ? 'you close' : `${organizer.name} closes`} the
-        vote. The winner becomes the final stay and the price is locked. A tie goes to the cheaper option.
+        vote, or the timer runs out. The winner becomes the final stay. A tie goes to the cheaper option.
       </Why>
     </Card>
   )
@@ -208,7 +225,6 @@ export function PayCard({ viewerId }) {
   const due = owes(state, viewer)
   const count = travellers(state).length
   const [method, setMethod] = useState(PAYMENT_METHODS[0].id)
-  const timeLeft = useTimeLeft(state.deadlineAt)
   const isTopUp = viewer.paid > 0
 
   if (due === 0) {
@@ -228,7 +244,8 @@ export function PayCard({ viewerId }) {
 
   return (
     <Card className="space-y-4">
-      <SectionTitle hint={state.deadlinePassed ? 'Deadline passed' : timeLeft}>{isTopUp ? 'Pay your top-up' : 'Pay your share'}</SectionTitle>
+      <SectionTitle>{isTopUp ? 'Pay your top-up' : 'Pay your share'}</SectionTitle>
+      <Deadline label="Time left to pay" at={state.deadlineAt} passed={state.deadlinePassed} />
 
       <div className="rounded-2xl bg-slate-50 p-4 text-sm">
         <Row label={`Flight ${TRIP.from.code} → ${TRIP.to.code} (yours alone)`} value={usd(TRIP.flight.perPerson)} />
@@ -286,7 +303,7 @@ export function Row({ label, value, strong }) {
 export function RoomsCard({ highlightId }) {
   const { state } = useGroup()
   const stay = lockedStay(state)
-  if (!stay) return null
+  if (!stay || !state.rooms) return null
   if (state.stage === 'change') {
     return (
       <Card className="space-y-2">
@@ -295,33 +312,31 @@ export function RoomsCard({ highlightId }) {
       </Card>
     )
   }
-  const people = travellers(state)
-  const label = (m) => `${m.name}${m.status === 'invited' ? ' (joining)' : ''}`
-  const rooms = stay.flat
-    ? [{ title: 'Whole villa, 3 bedrooms', occupants: people }]
-    : assignRooms(people).map((room) => ({
-        title: room.type === 'twin' ? 'Twin room' : state.keepRooms ? 'Twin room, one traveller' : 'Single room',
-        occupants: room.occupants,
-      }))
+  const nameOf = (id) => {
+    const m = memberById(state, id)
+    return `${m.name}${m.status === 'invited' ? ' (joining)' : ''}`
+  }
   return (
     <Card className="space-y-3">
       <SectionTitle hint={stay.name}>Rooms</SectionTitle>
-      {rooms.map((room, i) => {
-        const mine = room.occupants.some((m) => m.id === highlightId)
+      {state.rooms.map((room) => {
+        const mine = room.ids.includes(highlightId)
         return (
-          <div key={i} className={`flex items-center gap-3 rounded-2xl p-3 ${mine ? 'bg-brand-50' : 'bg-slate-50'}`}>
+          <div key={room.ids.join('-')} className={`flex items-center gap-3 rounded-2xl p-3 ${mine ? 'bg-brand-50' : 'bg-slate-50'}`}>
             <BedDouble className={`h-5 w-5 shrink-0 ${mine ? 'text-brand-600' : 'text-muted'}`} />
             <div className="min-w-0">
               <p className="text-sm font-semibold">
-                {room.title}
+                {roomLabel(stay, room)}
                 {mine && <span className="ml-1.5 text-xs font-medium text-brand-600">Your room</span>}
               </p>
-              <p className="truncate text-xs text-muted">{room.occupants.map(label).join(' + ')}</p>
+              <p className="truncate text-xs text-muted">{room.ids.map(nameOf).join(' + ')}</p>
             </div>
           </div>
         )
       })}
-      <p className="text-xs text-muted">Rooms are paired within the same gender, from each traveller's room preference.</p>
+      <p className="text-xs text-muted">
+        {state.price == null ? 'Not final yet. The organizer confirms the rooms.' : 'Arranged from roommate wishes and room preferences.'}
+      </p>
     </Card>
   )
 }
@@ -333,7 +348,7 @@ export function RulesCard() {
   const { min, payHours } = state.group
   const windowLabel = PAY_WINDOWS.find((w) => w.hours === payHours)?.label ?? `${payHours} hours`
   const rules = [
-    [Users, `Minimum ${min} travellers`, `The trip goes ahead once ${min} people have paid, so one slow person can't block everyone.`],
+    [Users, `Minimum ${min} travellers`, `The trip goes ahead once ${min} people have paid, so one slow person can't block everyone. If the group falls below it, the organizer decides: replace, continue with fewer, or cancel with refunds.`],
     [AlarmClock, `${windowLabel} to pay`, 'Flight and room prices are only held for a short time. Late payers get a reminder and 12 extra hours before their spot is released.'],
     [ShieldCheck, 'If someone drops out', 'Rooms and price are recalculated and the group picks a fix. Nobody pays more without approving it.'],
     [EyeOff, 'Private by default', 'Budgets and votes are never shown to the group. Passport details go only to the airline.'],
@@ -365,6 +380,8 @@ function memberBadges(state, m, detailed) {
   if (m.status === 'left') return [['removed', m.leftReason ?? 'Left']]
   const badges = [['done', 'Details added']]
   if (state.stage === 'voting') badges.push(m.vote ? ['done', 'Voted'] : ['pending', 'Not voted yet'])
+  if (state.stage === 'rooms' && !m.isOrganizer) badges.push(m.wished ? ['done', 'Roommate chosen'] : ['pending', 'Choosing roommate'])
+  if (state.stage === 'cancelled') return [...badges, m.refund ? ['done', detailed ? `Refunded ${usd(m.refund)}` : 'Refunded'] : ['invited', 'Nothing to refund']]
   if (state.price != null) {
     const due = owes(state, m)
     if (due === 0) badges.push(['done', detailed ? `Paid ${usd(m.paid)}` : 'Paid'])

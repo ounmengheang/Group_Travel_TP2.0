@@ -22,6 +22,8 @@ The demo is two web interfaces over one shared group, switched from the top bar:
 - **Organizer** (`src/organizer/OrganizerApp.jsx`): find the trip, create the group, share the link, open and close the stay vote, track payments, handle dropouts, book.
 - **Member** (`src/member/MemberApp.jsx`): open the invitation, add own details, private budget and room preference, vote, pay own share, approve changes, get a ticket, or leave.
 
+The flow is Join → Vote → Rooms → Pay → Booked. After the stay vote, members pick a roommate and the organizer arranges and confirms the rooms, which locks the price. Vote and payment deadlines show a live countdown. If the group falls below its minimum, the organizer can replace the traveller, continue with fewer, or cancel and refund everyone.
+
 The "Next step" bar under the top bar always says whose turn it is. The other friends are simulated and act on their own. One of them never pays, so the dropout path (recalculate rooms and price, pick a fix, approve, settle) always appears; "Fast-forward time" skips the payment deadline.
 
 - `src/data/mockData.js`: all dummy data (people, stays, prices).

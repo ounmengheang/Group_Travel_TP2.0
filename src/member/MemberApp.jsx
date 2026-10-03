@@ -1,4 +1,4 @@
-import { Check, CheckCircle2, Hourglass, Inbox, LogOut, Plane, ShieldCheck, UserMinus } from 'lucide-react'
+import { Ban, Check, CheckCircle2, Hourglass, Inbox, LogOut, Plane, ShieldCheck, UserMinus } from 'lucide-react'
 import { useState } from 'react'
 import Avatar, { AvatarStack } from '../components/Avatar'
 import DayPlan from '../components/DayPlan'
@@ -9,9 +9,9 @@ import TripOverview from '../components/TripOverview'
 import { Button, Card } from '../components/ui'
 import { BAGGAGE_OPTIONS, BUDGET_RANGES, MEMBER_INFO_PREFILL, PAY_WINDOWS, ROOM_PREFS, TRIP } from '../data/mockData'
 import { groupLink, usd } from '../lib/format'
-import { assignRooms } from '../lib/pricing'
+import { canShare, roomLabel } from '../lib/pricing'
 import { useGroup } from '../state/context'
-import { ME_ID, fixOptions, joined, lockedStay, meOf, organizerOf, owes, planned, refundFor, travellers, voteOptions } from '../state/groupState'
+import { ME_ID, fixOptions, joined, lockedStay, memberById, meOf, organizerOf, owes, planned, refundFor, roomOf, roomsPrice, travellers, voteOptions } from '../state/groupState'
 
 const BANNER = 'Member interface · You are Panhar, one of the invited friends. You add your own details, vote, and pay only your share.'
 const inputClass =
@@ -28,6 +28,15 @@ export default function MemberApp() {
         icon={Inbox}
         title="No invitation yet"
         text="When the organizer creates a group trip and shares the link, the invitation appears here. Switch to the Organizer interface to do that."
+      />
+    )
+  }
+  if (state.stage === 'cancelled' && me.status === 'joined') {
+    return (
+      <Notice
+        icon={Ban}
+        title="This trip was cancelled"
+        text={me.refund ? `The group could not continue. ${usd(me.refund)} is on its way back to your payment method.` : 'The group could not continue. You were not charged.'}
       />
     )
   }
@@ -290,6 +299,7 @@ function Home() {
 
       {stage === 'inviting' && <WaitingToVote />}
       {stage === 'voting' && <VoteCard viewerId={ME_ID} />}
+      {stage === 'rooms' && <RoomWish />}
       {stage === 'paying' && <Paying />}
       {stage === 'change' && <PlanChange />}
       {stage === 'booked' && <MyTicket />}
@@ -314,12 +324,19 @@ function Sidebar() {
     <>
       <Card className="space-y-2">
         <p className="text-sm text-muted">Your price</p>
-        {state.price == null ? (
+        {state.price == null && state.stage !== 'rooms' ? (
           <>
             <p className="text-3xl font-extrabold tracking-tight">
               {usd(low)}–{usd(high)}
             </p>
             <p className="text-xs text-muted">Final after the stay vote. Nothing to pay yet.</p>
+          </>
+        ) : state.price == null && state.stage === 'rooms' ? (
+          <>
+            <p className="text-3xl font-extrabold tracking-tight">≈ {usd(roomsPrice(state))}</p>
+            <p className="text-xs text-muted">
+              {stay.name} won the vote. The price locks when {organizerOf(state).name} confirms the rooms. Nothing to pay yet.
+            </p>
           </>
         ) : (
           <>
@@ -413,7 +430,7 @@ function Paying() {
     <>
       <Card className="space-y-2">
         <p className="text-xl font-bold">
-          {lockedStay(state).name} won. Your price is locked at {usd(state.price)}
+          Rooms are confirmed. Your price is locked at {usd(state.price)}
         </p>
         <p className="text-sm text-muted">This is the final amount for {people.length} travellers. It only changes if someone drops out, and then only with the group's approval.</p>
       </Card>
@@ -426,6 +443,63 @@ function Paying() {
         </Card>
       )}
     </>
+  )
+}
+
+// ---- Rooms: say who you would like to share with ----
+
+function RoomWish() {
+  const { state, dispatch, notify } = useGroup()
+  const me = meOf(state)
+  const stay = lockedStay(state)
+  const organizer = organizerOf(state)
+  const options = joined(state).filter((m) => m.id !== ME_ID && canShare(me, m))
+  const room = roomOf(state, ME_ID)
+  const roommate = room.ids.find((id) => id !== ME_ID)
+  const choose = (wish) => {
+    dispatch({ type: 'ROOM_WISH', id: ME_ID, wish })
+    notify(wish ? `Asked to share with ${memberById(state, wish).name}` : 'Saved: no roommate preference')
+  }
+
+  return (
+    <Card className="space-y-4">
+      <SectionTitle hint={stay.name}>Who would you like to share a room with?</SectionTitle>
+      <p className="text-sm text-muted">
+        {stay.fullName} won the vote. Rooms sleep two. Pick a roommate, or leave it to {organizer.name}. You only see people you can share with under everyone's room
+        preference.
+      </p>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        {options.map((m) => {
+          const selected = me.wished && me.roomWish === m.id
+          return (
+            <button
+              key={m.id}
+              type="button"
+              onClick={() => choose(m.id)}
+              className={`flex cursor-pointer items-center gap-2.5 rounded-2xl border-2 px-3 py-2.5 text-left transition ${selected ? 'border-brand-500 bg-brand-50/40' : 'border-slate-100 hover:border-brand-200'}`}
+            >
+              <Avatar member={m} size="sm" />
+              <span className="text-sm font-semibold">{m.name}</span>
+            </button>
+          )
+        })}
+        <button
+          type="button"
+          onClick={() => choose(null)}
+          className={`cursor-pointer rounded-2xl border-2 px-3 py-2.5 text-left text-sm font-semibold transition ${me.wished && !me.roomWish ? 'border-brand-500 bg-brand-50/40' : 'border-slate-100 text-muted hover:border-brand-200'}`}
+        >
+          No preference
+        </button>
+      </div>
+      {me.wished && (
+        <p className="flex items-start gap-2 text-sm font-medium text-emerald-700">
+          <Check className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={3} />
+          Saved. Right now you are in a {roomLabel(stay, room).toLowerCase()}
+          {roommate ? ` with ${memberById(state, roommate).name}` : ' on your own'}. {organizer.name} confirms the final rooms, and that locks the price.
+        </p>
+      )}
+      <Why>A wish is honoured when both people can share and nobody else is left without a bed. You can change it until the rooms are confirmed.</Why>
+    </Card>
   )
 }
 
@@ -502,8 +576,8 @@ function MyTicket() {
   const me = meOf(state)
   const stay = lockedStay(state)
   const people = travellers(state)
-  const room = stay.flat ? null : assignRooms(people).find((r) => r.occupants.some((m) => m.id === ME_ID))
-  const roommate = room?.occupants.find((m) => m.id !== ME_ID)
+  const roommateId = roomOf(state, ME_ID)?.ids.find((id) => id !== ME_ID)
+  const roommate = roommateId ? memberById(state, roommateId) : null
   return (
     <>
       <Card className="flex items-start gap-4 border-emerald-100 bg-emerald-50/60">
@@ -525,7 +599,7 @@ function MyTicket() {
               fields={[
                 ['Passenger', `${MEMBER_INFO_PREFILL.firstName} ${MEMBER_INFO_PREFILL.lastName}`],
                 ['Stay', stay.name],
-                ['Room', stay.flat ? 'Villa' : roommate ? `With ${roommate.name}` : 'Own room'],
+                ['Room', roommate ? `With ${roommate.name}` : 'Own room'],
               ]}
             />
           </>

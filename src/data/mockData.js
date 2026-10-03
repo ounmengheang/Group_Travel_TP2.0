@@ -37,6 +37,7 @@ export const STAYS = [
     area: 'Seminyak',
     rating: 4.8,
     flat: 1320,
+    bedrooms: 3,
     perks: ['Private pool', '2 min to beach', '3 bedrooms'],
   },
   {
@@ -77,12 +78,13 @@ export const PAY_WINDOWS = [
 // `late`: never pays, so the "someone drops out" path always appears.
 // `budget`: private max per person. Never shown to others, only counted.
 // `gender` is only used to pair rooms. `prefers`: the stay this friend votes for.
+// `roomWish`: who this friend asks to share a room with.
 export const PEOPLE = [
   { name: 'Boramey', role: 'organizer', gender: 'F', budget: 450 },
   { name: 'Panhar', role: 'me', gender: 'M' },
-  { name: 'Tena', gender: 'F', budget: 380, prefers: 'guest', late: true },
-  { name: 'Chesda', gender: 'M', budget: 420, prefers: 'hotel' },
-  { name: 'Sengheng', gender: 'M', budget: 400, prefers: 'guest' },
+  { name: 'Tena', gender: 'F', budget: 380, prefers: 'guest', late: true, roomWish: 'Boramey' },
+  { name: 'Chesda', gender: 'M', budget: 420, prefers: 'hotel', roomWish: 'Sengheng' },
+  { name: 'Sengheng', gender: 'M', budget: 400, prefers: 'guest', roomWish: 'Chesda' },
   { name: 'MengHeang', gender: 'M', budget: 500, prefers: 'hotel' },
 ]
 

@@ -1,4 +1,4 @@
-import { AlarmClock, Check, Copy, Link2, MessageCircle, Minus, PartyPopper, Plus, Send, UserMinus, UsersRound, X } from 'lucide-react'
+import { AlarmClock, Ban, BedDouble, Check, Copy, Link2, MessageCircle, Minus, PartyPopper, Plus, Send, Shuffle, UserMinus, UsersRound, X } from 'lucide-react'
 import { useState } from 'react'
 import Avatar from '../components/Avatar'
 import DayPlan from '../components/DayPlan'
@@ -8,19 +8,23 @@ import TripOverview from '../components/TripOverview'
 import { Button, Card, ProgressBar } from '../components/ui'
 import { GROUP_DEFAULTS, PAY_WINDOWS, PEOPLE, STAYS, TRIP } from '../data/mockData'
 import { groupLink, usd } from '../lib/format'
-import { perPerson } from '../lib/pricing'
+import { previewPrice, roomLabel, stayShare } from '../lib/pricing'
 import { useTimeLeft } from '../lib/useTimeLeft'
 import { useGroup } from '../state/context'
 import {
   ORGANIZER_ID,
   allSettled,
   approvalCount,
+  belowMinimum,
   canApplyFix,
   fixOptions,
   joined,
   lockedStay,
+  memberById,
   organizerOf,
   owes,
+  roomProblems,
+  roomsPrice,
   secured,
   travellers,
   voteOptions,
@@ -39,7 +43,7 @@ export default function OrganizerApp() {
 // Price range across the stay options for a group of `size`, before anyone has joined.
 function priceRange(size) {
   const people = PEOPLE.slice(0, size)
-  const prices = STAYS.map((stay) => perPerson(stay, people))
+  const prices = STAYS.map((stay) => previewPrice(stay, people))
   return [Math.min(...prices), Math.max(...prices)]
 }
 
@@ -237,9 +241,11 @@ function Dashboard() {
 
       {stage === 'inviting' && <InviteStep />}
       {stage === 'voting' && <VoteStep />}
+      {stage === 'rooms' && <RoomsStep />}
       {stage === 'paying' && <PayStep />}
       {stage === 'change' && <ChangeStep />}
       {stage === 'booked' && <BookedStep />}
+      {stage === 'cancelled' && <CancelledStep />}
 
       <div className="space-y-3">
         <SectionTitle hint="Budgets and votes stay private, even from you">Travellers</SectionTitle>
@@ -299,7 +305,7 @@ function Sidebar() {
             </div>
             {isCollecting(state) && (
               <p className="mt-3 flex items-center gap-1.5 text-xs text-white/70">
-                <AlarmClock className="h-3.5 w-3.5" /> {state.deadlinePassed ? 'Deadline passed · 12h extension running' : `Payment window: ${timeLeft}`}
+                <AlarmClock className="h-3.5 w-3.5" /> {state.deadlinePassed ? 'Deadline passed · 12h extension running' : `${timeLeft} left to pay`}
               </p>
             )}
           </div>
@@ -366,9 +372,14 @@ function InviteStep() {
 
       {state.linkShared && (
         <div className="space-y-3 border-t border-slate-100 pt-4">
-          <Button className="sm:w-auto" disabled={!ready} onClick={() => dispatch({ type: 'OPEN_VOTE' })}>
+          <Button className="sm:w-auto" disabled={!ready} onClick={() => dispatch({ type: 'OPEN_VOTE', now: Date.now() })}>
             Open the stay vote
           </Button>
+          {!ready && waiting === 0 && inGroup >= 2 && (
+            <Button variant="secondary" className="sm:w-auto" onClick={() => dispatch({ type: 'SET_MIN', min: inGroup })}>
+              Continue with {inGroup}: lower the minimum
+            </Button>
+          )}
           <Why tone={ready ? 'green' : 'brand'}>
             {ready
               ? `Minimum of ${state.group.min} reached, so you can start the vote.${waiting ? ` ${waiting} invited ${waiting === 1 ? 'friend has' : 'friends have'} not joined yet and can still join until you close the vote.` : ''}`
@@ -415,8 +426,8 @@ function VoteStep() {
         <SectionTitle hint={`${voted} of ${people.length} voted`}>Close the vote</SectionTitle>
         <p className="text-sm text-muted">
           {voted === people.length ? 'Everyone has voted. ' : 'You can close once more than half have voted. '}
-          Closing makes <span className="font-semibold text-ink">{leader.stay.name}</span> the final stay and locks the price at{' '}
-          <span className="font-semibold text-ink">{usd(leader.price)} per person</span>. The payment window then starts.
+          Closing makes <span className="font-semibold text-ink">{leader.stay.name}</span> the final stay, at about{' '}
+          <span className="font-semibold text-ink">{usd(leader.price)} per person</span>. Next you arrange the rooms, which locks the exact price.
         </p>
         {over > 0 && (
           <Why>
@@ -424,11 +435,138 @@ function VoteStep() {
             dropping out after the vote.
           </Why>
         )}
-        <Button className="sm:w-auto" disabled={!canClose} onClick={() => dispatch({ type: 'CLOSE_VOTE', now: Date.now() })}>
-          Close vote &amp; lock the price
+        <Button className="sm:w-auto" disabled={!canClose} onClick={() => dispatch({ type: 'CLOSE_VOTE' })}>
+          Close the vote
         </Button>
       </Card>
     </>
+  )
+}
+
+// ---- Stage: arrange rooms ----
+
+function RoomsStep() {
+  const { state, dispatch } = useGroup()
+  const stay = lockedStay(state)
+  const people = joined(state)
+  const others = people.filter((m) => !m.isOrganizer)
+  const answered = others.filter((m) => m.wished).length
+  const problems = roomProblems(state)
+  const price = roomsPrice(state)
+  const canConfirm = problems.length === 0 && answered === others.length
+
+  return (
+    <Card className="space-y-4">
+      <SectionTitle hint={`${answered} of ${others.length} chose a roommate`}>Arrange the rooms</SectionTitle>
+      <p className="text-sm text-muted">
+        <span className="font-semibold text-ink">{stay.fullName}</span> won the vote. Rooms are arranged from everyone's roommate wishes and room preferences. Move anyone
+        you like, then confirm to lock the price.
+      </p>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        {state.rooms.map((room, index) => (
+          <div key={room.ids.join('-')} className="space-y-3 rounded-3xl border-2 border-slate-100 p-4">
+            <div className="flex items-center justify-between gap-2">
+              <p className="flex items-center gap-2 font-bold">
+                <BedDouble className="h-5 w-5 text-brand-500" /> {roomLabel(stay, room)}
+              </p>
+              {!stay.flat && <span className="text-sm font-semibold text-muted">{usd(stay[room.type])}</span>}
+            </div>
+            {room.ids.map((id) => {
+              const m = memberById(state, id)
+              const wish = m.roomWish ? memberById(state, m.roomWish) : null
+              const granted = wish && room.ids.includes(wish.id)
+              // Rooms this person could move into: any other room with a free bed.
+              const targets = state.rooms.map((r, i) => ({ r, i })).filter(({ r, i }) => i !== index && r.ids.length === 1)
+              return (
+                <div key={id} className="flex flex-wrap items-center gap-2.5">
+                  <Avatar member={m} size="sm" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold">{m.name}</p>
+                    <p className={`text-xs ${wish && !granted ? 'text-amber-700' : 'text-muted'}`}>
+                      {m.isOrganizer
+                        ? 'You'
+                        : !m.wished
+                          ? 'Has not answered yet'
+                          : wish
+                            ? `Asked for ${wish.name}${granted ? ' ✓' : ' · not together'}`
+                            : 'No roommate preference'}
+                      {m.roomPref === 'same' ? ' · same gender only' : ' · anyone'}
+                    </p>
+                  </div>
+                  <select
+                    aria-label={`Move ${m.name}`}
+                    value=""
+                    onChange={(e) => dispatch({ type: 'MOVE', id, to: e.target.value === 'new' ? 'new' : Number(e.target.value) })}
+                    className="cursor-pointer rounded-xl border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium"
+                  >
+                    <option value="">Move…</option>
+                    {targets.map(({ r, i }) => (
+                      <option key={i} value={i}>
+                        Share with {memberById(state, r.ids[0]).name}
+                      </option>
+                    ))}
+                    {room.ids.length === 2 && <option value="new">Own room</option>}
+                  </select>
+                </div>
+              )
+            })}
+          </div>
+        ))}
+      </div>
+
+      {problems.map((problem) => (
+        <Why key={problem} tone="amber">
+          {problem}
+        </Why>
+      ))}
+
+      <div className="flex flex-wrap items-end justify-between gap-4 rounded-2xl bg-slate-50 p-4">
+        <div className="text-sm text-muted">
+          <p>Flight {usd(TRIP.flight.perPerson)} + stay share {usd(stayShare(price))}</p>
+          <p>The stay cost is shared equally between {people.length} travellers.</p>
+        </div>
+        <p className="text-3xl font-extrabold tracking-tight">
+          {usd(price)}
+          <span className="text-xs font-medium text-muted"> / person</span>
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <Button className="sm:w-auto" disabled={!canConfirm} onClick={() => dispatch({ type: 'CONFIRM_ROOMS', now: Date.now() })}>
+          Confirm rooms &amp; lock the price
+        </Button>
+        <Button variant="secondary" className="sm:w-auto" onClick={() => dispatch({ type: 'AUTO_ROOMS' })}>
+          <Shuffle className="h-4 w-4" /> Arrange automatically
+        </Button>
+      </div>
+      {answered < others.length && <p className="text-sm text-muted">Waiting for everyone to choose a roommate before you can confirm.</p>}
+    </Card>
+  )
+}
+
+// ---- Stage: cancelled ----
+
+function CancelledStep() {
+  const { state, dispatch } = useGroup()
+  const refunded = state.members.filter((m) => m.refund > 0)
+  return (
+    <Card className="space-y-4">
+      <div className="flex items-start gap-4">
+        <div className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-slate-100 text-muted">
+          <Ban className="h-6 w-6" />
+        </div>
+        <div>
+          <p className="text-2xl font-extrabold tracking-tight">Trip cancelled</p>
+          <p className="text-sm text-muted">
+            The group could not continue. {refunded.length ? `${refunded.length} ${refunded.length === 1 ? 'traveller was' : 'travellers were'} refunded.` : 'Nobody had been charged.'}
+          </p>
+        </div>
+      </div>
+      <Button variant="secondary" className="sm:w-auto" onClick={() => dispatch({ type: 'RESET' })}>
+        Start a new group trip
+      </Button>
+    </Card>
   )
 }
 
@@ -491,6 +629,8 @@ function ChangeStep() {
   const active = joined(state)
   const proposal = options.find((o) => o.id === change.proposal)
   const rejected = active.filter((m) => change.approvals[m.id] === false)
+  const picked = options.find((o) => o.id === choice)
+  const [cancelling, setCancelling] = useState(false)
 
   return (
     <Card className="space-y-4 border-amber-200">
@@ -508,6 +648,18 @@ function ChangeStep() {
           </p>
         </div>
       </div>
+
+      {belowMinimum(state) && (
+        <div className="space-y-3 rounded-2xl bg-rose-50 p-4">
+          <p className="font-bold text-rose-700">
+            The group is now {active.length}, below your minimum of {state.group.min}
+          </p>
+          <p className="text-sm text-rose-900">Decide whether the group can continue. You can replace the traveller, carry on with fewer people, or cancel and refund everyone.</p>
+          <Button variant="secondary" className="sm:w-auto" onClick={() => dispatch({ type: 'SET_MIN', min: active.length })}>
+            Continue with {active.length}: lower the minimum
+          </Button>
+        </div>
+      )}
 
       {!proposal ? (
         <>
@@ -546,9 +698,14 @@ function ChangeStep() {
           <Why>
             Flights are per person, so they leave with the traveller. The stay is shared, so its cost is split between fewer people. That is why the price can move.
           </Why>
-          <Button className="sm:w-auto" disabled={!choice} onClick={() => dispatch({ type: 'PROPOSE', fixId: choice })}>
-            Propose this to the group
-          </Button>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Button className="sm:w-auto" disabled={!picked || picked.disabled} onClick={() => dispatch({ type: 'PROPOSE', fixId: picked.id })}>
+              Propose this to the group
+            </Button>
+            <Button variant="ghost" className="text-rose-600 hover:bg-rose-50 sm:w-auto" onClick={() => setCancelling(true)}>
+              Cancel the trip &amp; refund everyone
+            </Button>
+          </div>
         </>
       ) : (
         <>
@@ -588,6 +745,25 @@ function ChangeStep() {
             </Button>
           </div>
         </>
+      )}
+      {cancelling && (
+        <Modal title="Cancel the whole trip?" subtitle="This ends the group trip for everyone." onClose={() => setCancelling(false)}>
+          <div className="space-y-4">
+            <Why tone="amber">
+              {state.wasBooked
+                ? `The trip was already booked, so each traveller gets their payment back minus the airline's ${usd(TRIP.flight.cancelFee)} cancellation fee.`
+                : 'Nothing is booked yet, so everyone who paid gets all of it back.'}
+            </Why>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button variant="danger" onClick={() => dispatch({ type: 'CANCEL_TRIP' })}>
+                Cancel &amp; refund
+              </Button>
+              <Button variant="secondary" onClick={() => setCancelling(false)}>
+                Keep the trip
+              </Button>
+            </div>
+          </div>
+        </Modal>
       )}
     </Card>
   )
